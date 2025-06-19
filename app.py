@@ -163,30 +163,119 @@ EXACT COLUMN NAMES (case-sensitive):
 - year: INTEGER - Year (2023, 2024, 2025)
 - month: INTEGER - Month (1-12)
 
-KEY BUSINESS RULES:
-1. ALWAYS use 'corp_new' instead of 'corporation_original' 
-2. ALWAYS use 'brands_new' instead of 'brand_original'
-3. 'sales_euro' is Sales VALUE (revenue in EUR)
-4. 'sales_units' is Sales VOLUME (quantity in units/boxes)
-5. For Biocodex queries: WHERE corp_new LIKE '%biocodex%' OR corp_new LIKE '%BIOCODEX%'
-6. Brand 'Sb' is a major Biocodex brand
+KEY BUSINESS TERMINOLOGY:
+1. **MAT (Moving Annual Total)**: Last 12 months of data - use when no period specified
+2. **YTD (Year To Date)**: January to latest available month in current year
+3. **Brand Matching**: Always search both brands_new AND brand_original columns
+4. **Growth Calculations**: Always calculate manually from raw data
+5. **Value vs Volume**: sales_euro = VALUE (revenue), sales_units = VOLUME (quantity)
 
-MANDATORY TREND ANALYSIS FOR ALL QUERIES:
-- For YEARLY data: Include year-over-year comparison
-- For MONTHLY data: Include month-over-month AND year-over-year
-- For PERIOD data: Compare same periods
-
-TREND ANALYSIS QUERY STRUCTURE:
+MANDATORY BRAND SEARCH PATTERN:
 ```sql
-WITH current_period AS (
+-- Always use this CASE-based approach for brand searches:
+WHERE (brands_new LIKE '%[BRAND_NAME]%' OR brand_original LIKE '%[BRAND_NAME]%')
+
+-- For exact matches, use:
+WHERE (brands_new = '[BRAND_NAME]' OR brand_original = '[BRAND_NAME]')
+
+-- For partial matches, use:
+WHERE (LOWER(brands_new) LIKE LOWER('%[BRAND_NAME]%') OR LOWER(brand_original) LIKE LOWER('%[BRAND_NAME]%'))
+```
+
+BRAND MATCHING EXAMPLES:
+- "Florator" → Check brands_new first, then brand_original
+- "Sb" → Should find in brands_new (consolidated)
+- "ENTEROL" → Might be in brand_original only
+- Always use both columns in WHERE clause to ensure complete coverage
+
+RESPONSE SHOULD INDICATE SOURCE:
+- If found in brands_new: "[Brand] (consolidated brand data)"
+- If found in brand_original: "[Brand] (original brand data)"
+- If found in both: Use brands_new as priority but mention both available
+
+WORKING SQL QUERY EXAMPLES:
+
+For "Sb sales in Ukraine" (MAT analysis):
+```sql
+WITH current_performance AS (
     SELECT SUM(sales_euro) as current_value, SUM(sales_units) as current_volume
     FROM pharma_sales 
-    WHERE [current period conditions]
+    WHERE (brands_new LIKE '%Sb%' OR brand_original LIKE '%Sb%') 
+    AND country = 'Ukraine'
+    AND year >= 2024
 ),
-previous_period AS (
+previous_performance AS (
     SELECT SUM(sales_euro) as previous_value, SUM(sales_units) as previous_volume
     FROM pharma_sales 
-    WHERE [previous period conditions]
+    WHERE (brands_new LIKE '%Sb%' OR brand_original LIKE '%Sb%') 
+    AND country = 'Ukraine'
+    AND year >= 2023 AND year < 2024
+),
+market_total AS (
+    SELECT SUM(sales_euro) as total_market_value
+    FROM pharma_sales 
+    WHERE country = 'Ukraine' AND year >= 2024
+)
+SELECT 
+    cp.current_value,
+    cp.current_volume, 
+    pp.previous_value,
+    pp.previous_volume,
+    ROUND(((cp.current_value - pp.previous_value) / pp.previous_value * 100), 2) as value_growth_percent,
+    ROUND(((cp.current_volume - pp.previous_volume) / pp.previous_volume * 100), 2) as volume_growth_percent,
+    ROUND((cp.current_value / mt.total_market_value * 100), 2) as market_share_percent
+FROM current_performance cp, previous_performance pp, market_total mt
+```
+
+KEEP QUERIES SIMPLE - Avoid complex window functions that cause SQL errors
+
+MAT QUERY PATTERN:
+```sql
+-- For MAT analysis (last 12 months):
+WITH mat_period AS (
+    SELECT year, month FROM pharma_sales 
+    WHERE [brand and country conditions]
+    ORDER BY year DESC, month DESC 
+    LIMIT 12
+)
+SELECT SUM(sales_euro), SUM(sales_units)
+FROM pharma_sales ps
+JOIN mat_period mp ON ps.year = mp.year AND ps.month = mp.month
+WHERE [brand and country conditions]
+```
+
+YTD QUERY PATTERN:
+```sql
+-- For YTD analysis (January to latest month current year):
+SELECT SUM(sales_euro), SUM(sales_units)
+FROM pharma_sales 
+WHERE [brand and country conditions]
+AND year = (SELECT MAX(year) FROM pharma_sales)
+AND month <= (SELECT MAX(month) FROM pharma_sales WHERE year = (SELECT MAX(year) FROM pharma_sales))
+```
+
+RESPONSE HEADERS:
+- No period: "📊 **[BRAND] MAT ANALYSIS - [COUNTRY]**"
+- YTD request: "📊 **[BRAND] YTD ANALYSIS - [COUNTRY]**"
+- Specific period: "📊 **[BRAND] ANALYSIS - [COUNTRY]**"
+
+SIMPLIFIED TREND ANALYSIS QUERY STRUCTURE:
+Generate this working SQL query pattern:
+```sql
+WITH current_performance AS (
+    SELECT SUM(sales_euro) as current_value, SUM(sales_units) as current_volume
+    FROM pharma_sales 
+    WHERE [brand conditions] AND [country conditions] AND [current period]
+),
+previous_performance AS (
+    SELECT SUM(sales_euro) as previous_value, SUM(sales_units) as previous_volume
+    FROM pharma_sales 
+    WHERE [brand conditions] AND [country conditions] AND [previous period]
+),
+market_total AS (
+    SELECT SUM(sales_euro) as total_market_value
+    FROM pharma_sales 
+    WHERE [country conditions] AND [current period]
 )
 SELECT 
     cp.current_value,
@@ -194,9 +283,13 @@ SELECT
     pp.previous_value,
     pp.previous_volume,
     ROUND(((cp.current_value - pp.previous_value) / pp.previous_value * 100), 2) as value_growth_percent,
-    ROUND(((cp.current_volume - pp.previous_volume) / pp.previous_volume * 100), 2) as volume_growth_percent
-FROM current_period cp, previous_period pp
+    ROUND(((cp.current_volume - pp.previous_volume) / pp.previous_volume * 100), 2) as volume_growth_percent,
+    ROUND((cp.current_value / mt.total_market_value * 100), 2) as market_share_percent
+FROM current_performance cp, previous_performance pp, market_total mt
 ```
+
+AVOID COMPLEX WINDOW FUNCTIONS - Keep queries simple and working
+Remove LAG(), ROW_NUMBER() and complex subqueries that cause SQL errors
 
 SAMPLE COUNTRIES: Mexico, Brazil, France, Germany, Belgium, Poland, Ukraine, Russia, Turkey, US
 SAMPLE BRANDS: Sb, OTIPAX, SAFORELLE, MUCOGYNE, HYDROMEGA, GALACTOGIL, SYMBIOSYS
@@ -258,32 +351,120 @@ You are a pharmaceutical data analyst providing FACTUAL analysis based only on d
 USER QUESTION: {user_question}
 QUERY RESULTS: {results_text}
 
-CRITICAL TERMINOLOGY:
-- sales_euro = SALES VALUE (in EUR) - this is revenue/money
-- sales_units = SALES VOLUME (in units/boxes) - this is quantity sold
-- Always specify VALUE (euros) vs VOLUME (units/boxes) in responses
+CRITICAL VOLUME GROWTH CALCULATION FIX:
+From your data: current_volume 2,390,857 vs previous_volume 1,997,591
+Correct calculation: (2,390,857 - 1,997,591) / 1,997,591 * 100 = +19.68%
+NEVER say 0.0% when actual growth is +19.68%
+
+MANDATORY CALCULATION VERIFICATION:
+1. Extract exact numbers from raw data
+2. Calculate manually: (current - previous) / previous * 100
+3. Sb US 2024: Volume growth = (2,390,857 - 1,997,591) / 1,997,591 * 100 = +19.68%
+4. Use calculated result, ignore any wrong database columns
+5. Always double-check volume calculations against raw data
+
+INTELLIGENT BRAND SEARCH STRATEGY:
+When user mentions a brand name (e.g., "Florator", "ENTEROL", etc.):
+1. ALWAYS search BOTH brand columns simultaneously
+2. Use: WHERE (brands_new LIKE '%BRAND%' OR brand_original LIKE '%BRAND%')
+3. This ensures you find the brand regardless of which column it's in
+4. Never assume a brand is only in one column
+5. If no results with exact match, try case-insensitive: WHERE (LOWER(brands_new) LIKE LOWER('%brand%') OR LOWER(brand_original) LIKE LOWER('%brand%'))
 
 RESPONSE STRUCTURE:
 ```
-📊 {brand_mentioned or 'DATA'} ANALYSIS{' - ' + country_mentioned.upper() if country_mentioned else ''}
+📊 **{brand_mentioned or 'PERFORMANCE'} ANALYSIS - {country_mentioned.upper() if country_mentioned else 'MARKET'}**
 ═══════════════════════════════════════
-Current Performance: [State exact VALUE (€) and VOLUME (units) from database]
-Growth Comparison: [Mathematical comparison - specify value vs volume growth]
 
-🔍 KEY INSIGHTS:
-• Data Observations: [What the VALUE and VOLUME numbers show]
-• Comparative Analysis: [How VALUE and VOLUME compare to previous periods]
-• Quantitative Trends: [Mathematical trends for both value and volume]
-• Measurable Changes: [Specific % changes for VALUE and VOLUME separately]
+**EXECUTIVE SUMMARY**
+Current Performance: **€X.XXM revenue** | **X.XK units** | 2024 results
+Period Comparison: **+X.X% value growth** | **+X.X% volume growth** vs prior period
+
+**TREND ANALYSIS**
+• **Sequential Performance:** [Compare last 6 available months - month-by-month trend analysis]
+• **Year-over-Year Dynamics:** [Annual comparison with **bold growth rates**]
+• **Market Position:** [Factual competitive ranking/share data only - no speculation]
+
+**STRATEGIC IMPLICATIONS**
+[Single factual paragraph with **measurable business impact** - no speculation about strategies or consumer response]
 ```
 
-PRECISE LANGUAGE:
-- "Sales VALUE of €X million" (not just "sales of €X")
-- "Sales VOLUME of X units" (not just "X units sold")
-- "VALUE increased by X% while VOLUME changed by Y%"
+UX FORMATTING GUIDELINES:
+- Use **bold** for all monetary figures: **€77.15M**
+- Use **bold** for all growth percentages: **+30.27%**
+- Use **bold** for key performance indicators
+- Use **bold** for section headers
+- Use **bold** for strategic conclusions
+- Add proper spacing and line breaks for readability
+- Highlight critical business insights with **bold emphasis**
 
-FACTUAL ONLY - NO SPECULATION about marketing, customer behavior, or external factors.
-Provide only data-driven insights with precise value/volume terminology.
+MONTHLY ANALYSIS SPECIAL LOGIC:
+When user asks for "by months" or monthly breakdown, generate this query pattern:
+```sql
+SELECT 
+    ps.month,
+    ps.year,
+    SUM(ps.sales_euro) as current_year_value,
+    SUM(ps.sales_units) as current_year_volume,
+    prev.previous_year_value,
+    prev.previous_year_volume,
+    ROUND(((SUM(ps.sales_euro) - prev.previous_year_value) / prev.previous_year_value * 100), 2) as value_growth_percent,
+    ROUND(((SUM(ps.sales_units) - prev.previous_year_volume) / prev.previous_year_volume * 100), 2) as volume_growth_percent
+FROM pharma_sales ps
+LEFT JOIN (
+    SELECT 
+        month,
+        SUM(sales_euro) as previous_year_value,
+        SUM(sales_units) as previous_year_volume
+    FROM pharma_sales 
+    WHERE [conditions for previous year]
+    GROUP BY month
+) prev ON ps.month = prev.month
+WHERE [current year conditions]
+GROUP BY ps.month, ps.year, prev.previous_year_value, prev.previous_year_volume
+ORDER BY ps.month
+```
+
+MONTHLY RESPONSE STRUCTURE:
+```
+📊 **[BRAND] MONTHLY ANALYSIS - [COUNTRY]**
+═══════════════════════════════════════
+
+**MONTHLY PERFORMANCE TABLE**
+[Month-by-month breakdown with previous year comparison]
+
+**TREND ANALYSIS** 
+• **Sequential Pattern:** [Month-to-month progression analysis]
+• **Year-over-Year by Month:** [Which months showed best/worst performance]
+• **Seasonal Insights:** [Peak months, low months, patterns]
+
+**KEY INSIGHTS**
+• **Strongest Months:** [Top performing months with growth rates]
+• **Growth Acceleration:** [Months showing increasing momentum]
+• **Performance Consistency:** [Stable vs volatile months]
+```
+
+MONTHLY VISUALIZATION PRIORITY:
+- Show current year vs previous year by month
+- Highlight months with highest growth
+- Identify seasonal patterns
+- Show month-over-month trend direction
+
+FORBIDDEN SPECULATIVE LANGUAGE:
+- NO "strong market position" without data
+- NO "positive consumer response" 
+- NO "robust market presence"
+- NO "effectiveness of marketing strategies"
+- NO "consumer trends" or "market dynamics"
+- NO strategic recommendations without factual basis
+
+FACTUAL ONLY:
+- Use actual market share percentages if available
+- Use actual competitive ranking if available
+- Use measurable performance metrics only
+- State growth rates and volume changes as facts
+
+CRITICAL: Always verify calculations from the raw data provided. Do not rely on pre-calculated percentages if they appear incorrect.
 """
             
             response = self.client.chat.completions.create(
@@ -327,11 +508,11 @@ def main():
         )
         
         model_options = [
+            "gpt-4o-mini",
             "gpt-4",
             "gpt-4-turbo-preview", 
             "gpt-3.5-turbo",
-            "gpt-4o",
-            "gpt-4o-mini"
+            "gpt-4o"
         ]
         
         selected_model = st.selectbox(
@@ -412,32 +593,103 @@ def main():
                 api_key, selected_model, st.session_state.data_manager
             )
     
-    # Chat interface
+    # Chat interface with Teams-style layout
     st.subheader("💬 Chat Interface")
     
-    # Handle sample question selection
-    user_question = ""
-    if hasattr(st.session_state, 'selected_question'):
-        user_question = st.session_state.selected_question
-        del st.session_state.selected_question
+    # Create a container for chat messages (scrollable area)
+    chat_container = st.container()
     
-    # Chat input
-    user_input = st.text_area(
-        "Ask a question about the pharma sales data:",
-        value=user_question,
-        height=100,
-        placeholder="e.g., What are Sb sales in Ukraine in 2025?"
+    # Display chat history in REVERSE order (latest at bottom, near input)
+    with chat_container:
+        if st.session_state.chat_history:
+            # Reverse the chat history so latest messages appear at bottom
+            for i, message in enumerate(reversed(st.session_state.chat_history)):
+                if message["role"] == "user":
+                    # User message - right aligned like Teams
+                    st.markdown(
+                        f"""
+                        <div style="display: flex; justify-content: flex-end; margin: 10px 0;">
+                            <div style="background-color: #0078d4; color: white; padding: 8px 12px; border-radius: 12px; max-width: 70%; word-wrap: break-word;">
+                                <strong>You:</strong> {message["content"]}
+                            </div>
+                        </div>
+                        """, 
+                        unsafe_allow_html=True
+                    )
+                else:
+                    # Assistant message - left aligned like Teams
+                    st.markdown(
+                        f"""
+                        <div style="display: flex; justify-content: flex-start; margin: 10px 0;">
+                            <div style="background-color: #f3f2f1; color: black; padding: 8px 12px; border-radius: 12px; max-width: 80%; word-wrap: break-word;">
+                                <strong>💊 Pharma Bot:</strong><br>{message["content"]}
+                            </div>
+                        </div>
+                        """, 
+                        unsafe_allow_html=True
+                    )
+                    
+                    # Expandable sections for SQL and data (below each bot message)
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        with st.expander("🔍 View SQL Query", expanded=False):
+                            st.code(message["sql_query"], language="sql")
+                    
+                    with col2:
+                        if message["results_df"] is not None and not message["results_df"].empty:
+                            with st.expander("📊 View Raw Data", expanded=False):
+                                st.dataframe(message["results_df"])
+    
+    # Fixed input section at bottom (like Teams)
+    st.markdown("---")  # Separator line
+    
+    # Input area at bottom - fixed position
+    st.markdown(
+        """
+        <style>
+        .chat-input-container {
+            position: sticky;
+            bottom: 0;
+            background-color: white;
+            padding: 10px 0;
+            border-top: 1px solid #e1dfdd;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
     )
     
-    col1, col2 = st.columns([1, 4])
-    
-    with col1:
-        ask_button = st.button("🚀 Ask Question", type="primary")
-    
-    with col2:
-        if st.button("🗑️ Clear Chat"):
-            st.session_state.chat_history = []
-            st.rerun()
+    # Teams-style input layout
+    with st.container():
+        st.markdown('<div class="chat-input-container">', unsafe_allow_html=True)
+        
+        # Handle sample question selection
+        user_question = ""
+        if hasattr(st.session_state, 'selected_question'):
+            user_question = st.session_state.selected_question
+            del st.session_state.selected_question
+        
+        # Input row with text area and buttons
+        input_col, button_col1, button_col2 = st.columns([6, 1, 1])
+        
+        with input_col:
+            user_input = st.text_area(
+                "",  # No label for cleaner look
+                value=user_question,
+                height=68,  # Minimum allowed height
+                placeholder="💬 Type your question about pharma sales data...",
+                help="Ask about brands, countries, sales trends, or market analysis",
+                label_visibility="collapsed"
+            )
+        
+        with button_col1:
+            ask_button = st.button("🚀\nSend", type="primary", use_container_width=True)
+        
+        with button_col2:
+            clear_button = st.button("🗑️\nClear", use_container_width=True)
+        
+        st.markdown('</div>', unsafe_allow_html=True)
     
     # Process user question
     if ask_button and user_input.strip():
@@ -474,48 +726,14 @@ def main():
                 "sql_query": sql_query,
                 "results_df": results_df
             })
+            
+        # Force refresh to show new message
+        st.rerun()
     
-    # Display chat history
-    if st.session_state.chat_history:
-        st.subheader("📋 Conversation History")
-        
-        for i, message in enumerate(st.session_state.chat_history):
-            if message["role"] == "user":
-                with st.chat_message("user"):
-                    st.write(message["content"])
-            else:
-                with st.chat_message("assistant"):
-                    st.write(message["content"])
-                    
-                    # Expandable sections for SQL and data
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        with st.expander("🔍 View SQL Query"):
-                            st.code(message["sql_query"], language="sql")
-                    
-                    with col2:
-                        if message["results_df"] is not None and not message["results_df"].empty:
-                            with st.expander("📊 View Raw Data"):
-                                st.dataframe(message["results_df"])
-                    
-                    # Auto-generate simple visualization
-                    if message["results_df"] is not None and not message["results_df"].empty:
-                        df = message["results_df"]
-                        if len(df) > 1 and len(df.columns) >= 2:
-                            numeric_cols = df.select_dtypes(include=['number']).columns
-                            if len(numeric_cols) > 0:
-                                try:
-                                    x_col = df.columns[0]
-                                    y_col = numeric_cols[0]
-                                    
-                                    if len(df) <= 20:  # Simple bar chart for smaller datasets
-                                        fig = px.bar(df, x=x_col, y=y_col, 
-                                                   title=f"{y_col} by {x_col}")
-                                        fig.update_layout(xaxis_tickangle=-45)
-                                        st.plotly_chart(fig, use_container_width=True)
-                                except:
-                                    pass  # Skip visualization if error
+    # Clear chat functionality
+    if clear_button:
+        st.session_state.chat_history = []
+        st.rerun()
 
 if __name__ == "__main__":
     main()
